@@ -5,7 +5,7 @@ function processDroneDataset(inputFolder, outputFolder)
     cfg.contrastThreshold = 0.15;
     cfg.lowContrastHSV = 0.1;
     cfg.lightingVarThreshold = 0.03;
-    cfg.edgeWeakThreshold = 0.05;
+    cfg.edgeWeakThreshold = 0.20;        % Increased for more edge detection
     cfg.noiseFractionThreshold = 0.03;   % Less aggressive
     cfg.gapFractionThreshold = 0.015;    % Less aggressive
     cfg.houghRadiusRange = [5 50];
@@ -64,6 +64,9 @@ function processDroneDataset(inputFolder, outputFolder)
         fprintf(fid, "Edge Density: %.6f\n", metrics.edgeDensity);
         fprintf(fid, "Lighting Variance: %.6f\n", metrics.lightingVar);
 
+        fprintf(fid, "\nFiltering:\n");
+        fprintf(fid, "Gaussian Sigma Used: %.3f\n", metrics.gaussianSigma);
+
         fprintf(fid, "\nMorphology Metrics:\n");
         fprintf(fid, "Noise Fraction: %.6f\n", metrics.noiseFraction);
         fprintf(fid, "Gap Fraction: %.6f\n", metrics.gapFraction);
@@ -78,7 +81,7 @@ function processDroneDataset(inputFolder, outputFolder)
         fclose(fid);
     end
 
-    disp('Dataset processing complete (uniform label visualization).');
+    disp('Dataset processing complete (aggressive Canny edges).');
 
 end
 
@@ -99,6 +102,7 @@ function [pyramidImages, visImg, pipelineStages, metrics, pyramidBoxes, scales] 
     metrics.noise = noiseMetric;
     metrics.edgeDensity = edgeMetric;
     metrics.lightingVar = mean(lightingVar, 'all');
+    metrics.gaussianSigma = 0;
 
     visSteps = {};
     stageLabels = {};
@@ -125,73 +129,59 @@ function [pyramidImages, visImg, pipelineStages, metrics, pyramidBoxes, scales] 
         stageLabels{end+1} = pipelineStages{end};
     end
 
-    % --- Gaussian smoothing ---
+    % --- Adaptive Gaussian smoothing ---
     if noiseMetric > cfg.noiseThreshold
-        imgToProcess = imgaussfilt(imgToProcess, 2);
-        pipelineStages{end+1} = 'Gaussian Smoothing';
+        sigma = min(1.0, max(0.3, noiseMetric * 8));
+        imgToProcess = imgaussfilt(imgToProcess, sigma, 'FilterSize', 3);
+
+        metrics.gaussianSigma = sigma;
+        pipelineStages{end+1} = sprintf('Gaussian Smoothing (σ=%.2f)', sigma);
         visSteps{end+1} = imgToProcess;
         stageLabels{end+1} = pipelineStages{end};
     end
 
-    % --- Adaptive Thresholding vs. Canny ---
-    if metrics.lightingVar > cfg.lightingVarThreshold
-        T = adaptthresh(imgToProcess, 0.4);
-        imgToProcess = imbinarize(imgToProcess, T);
-        pipelineStages{end+1} = 'Adaptive Thresholding (Pre-Canny)';
+    % --- Canny Edge Detection (more aggressive) ---
+    if edgeMetric < cfg.edgeWeakThreshold
+        imgToProcess = edge(imgToProcess, 'Canny', [0.04 0.2]); % Custom thresholds
+        pipelineStages{end+1} = 'Canny Edge Detection';
         visSteps{end+1} = imgToProcess;
         stageLabels{end+1} = pipelineStages{end};
-
-        if edgeMetric < cfg.edgeWeakThreshold
-            imgToProcess = edge(imgToProcess, 'Canny');
-            pipelineStages{end+1} = 'Canny Edge Detection (Post-Threshold)';
-            visSteps{end+1} = imgToProcess;
-            stageLabels{end+1} = pipelineStages{end};
-        end
-    else
-        if edgeMetric < cfg.edgeWeakThreshold
-            imgToProcess = edge(imgToProcess, 'Canny');
-            pipelineStages{end+1} = 'Canny Edge Detection (Pre-Threshold)';
-            visSteps{end+1} = imgToProcess;
-            stageLabels{end+1} = pipelineStages{end};
-        end
     end
 
-    % --- Less aggressive Morphological decision ---
-    if ~islogical(imgToProcess)
-        level = graythresh(imgToProcess);
-        binaryImg = imbinarize(imgToProcess, level);
-    else
-        binaryImg = imgToProcess;
+    % --- Selective Grayscale Morphology ---
+    imgForMetrics = im2double(imgToProcess);
+    if islogical(imgForMetrics)
+        imgForMetrics = mat2gray(imgForMetrics);
     end
+    tempMask = imbinarize(imgForMetrics, graythresh(imgForMetrics));
 
-    noiseFraction = sum(bwareaopen(binaryImg, 2, 8),'all') / numel(binaryImg);
-    filledImg = imfill(binaryImg, 'holes');
-    gapFraction = sum(filledImg(:) - binaryImg(:)) / numel(binaryImg);
+    noiseFraction = sum(bwareaopen(tempMask, 2, 8),'all') / numel(tempMask);
+    filledMask = imfill(tempMask, 'holes');
+    gapFraction = sum(filledMask(:) - tempMask(:)) / numel(tempMask);
 
     se = strel('disk', 3);
 
     if noiseFraction >= cfg.noiseFractionThreshold && noiseFraction > gapFraction
-        imgToProcess = imopen(binaryImg, se);
-        morphOp = 'Opening';
-        pipelineStages{end+1} = 'Morphological Opening';
+        imgToProcess = imopen(imgToProcess, se);
+        morphOp = 'Grayscale Opening';
+        pipelineStages{end+1} = morphOp;
         visSteps{end+1} = imgToProcess;
-        stageLabels{end+1} = pipelineStages{end};
+        stageLabels{end+1} = morphOp;
 
     elseif gapFraction >= cfg.gapFractionThreshold && gapFraction > noiseFraction
-        imgToProcess = imclose(binaryImg, se);
-        morphOp = 'Closing';
-        pipelineStages{end+1} = 'Morphological Closing';
+        imgToProcess = imclose(imgToProcess, se);
+        morphOp = 'Grayscale Closing';
+        pipelineStages{end+1} = morphOp;
         visSteps{end+1} = imgToProcess;
-        stageLabels{end+1} = pipelineStages{end};
+        stageLabels{end+1} = morphOp;
 
     elseif noiseFraction >= cfg.noiseFractionThreshold && gapFraction >= cfg.gapFractionThreshold
-        imgToProcess = imclose(imopen(binaryImg, se), se);
-        morphOp = 'Opening + Closing';
-        pipelineStages{end+1} = 'Opening + Closing';
+        imgToProcess = imclose(imopen(imgToProcess, se), se);
+        morphOp = 'Grayscale Opening + Closing';
+        pipelineStages{end+1} = morphOp;
         visSteps{end+1} = imgToProcess;
-        stageLabels{end+1} = pipelineStages{end};
+        stageLabels{end+1} = morphOp;
     else
-        imgToProcess = imgToProcess;
         morphOp = 'None';
     end
 
