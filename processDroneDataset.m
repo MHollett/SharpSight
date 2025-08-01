@@ -5,9 +5,9 @@ function processDroneDataset(inputFolder, outputFolder)
     cfg.contrastThreshold = 0.15;
     cfg.lowContrastHSV = 0.1;
     cfg.lightingVarThreshold = 0.03;
-    cfg.edgeWeakThreshold = 0.20;        % Increased for more edge detection
-    cfg.noiseFractionThreshold = 0.03;   % Less aggressive
-    cfg.gapFractionThreshold = 0.015;    % Less aggressive
+    cfg.edgeWeakThreshold = 0.10;      
+    cfg.noiseFractionThreshold = 0.03;  
+    cfg.gapFractionThreshold = 0.015;    
     cfg.houghRadiusRange = [5 50];
     cfg.pyramidScales = [1, 0.5, 0.25];
 
@@ -81,7 +81,7 @@ function processDroneDataset(inputFolder, outputFolder)
         fclose(fid);
     end
 
-    disp('Dataset processing complete (aggressive Canny edges).');
+    disp('Dataset processing complete (morphology before edge detection).');
 
 end
 
@@ -140,15 +140,7 @@ function [pyramidImages, visImg, pipelineStages, metrics, pyramidBoxes, scales] 
         stageLabels{end+1} = pipelineStages{end};
     end
 
-    % --- Canny Edge Detection (more aggressive) ---
-    if edgeMetric < cfg.edgeWeakThreshold
-        imgToProcess = edge(imgToProcess, 'Canny', [0.04 0.2]); % Custom thresholds
-        pipelineStages{end+1} = 'Canny Edge Detection';
-        visSteps{end+1} = imgToProcess;
-        stageLabels{end+1} = pipelineStages{end};
-    end
-
-    % --- Selective Grayscale Morphology ---
+    % --- Grayscale Morphology BEFORE Edge Detection ---
     imgForMetrics = im2double(imgToProcess);
     if islogical(imgForMetrics)
         imgForMetrics = mat2gray(imgForMetrics);
@@ -188,6 +180,14 @@ function [pyramidImages, visImg, pipelineStages, metrics, pyramidBoxes, scales] 
     metrics.noiseFraction = noiseFraction;
     metrics.gapFraction = gapFraction;
     metrics.morphologyOperation = morphOp;
+
+    % --- Canny Edge Detection AFTER Morphology ---
+    if edgeMetric < cfg.edgeWeakThreshold
+        imgToProcess = edge(imgToProcess, 'Canny', [0.04 0.2]); % custom thresholds
+        pipelineStages{end+1} = 'Canny Edge Detection';
+        visSteps{end+1} = imgToProcess;
+        stageLabels{end+1} = pipelineStages{end};
+    end
 
     % --- Multi-scale pyramid + Hough ---
     scales = cfg.pyramidScales;
