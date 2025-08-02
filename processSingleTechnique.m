@@ -18,12 +18,28 @@ function processSingleTechnique(inputFolder, outputFolder, technique)
         
         [~, baseName, ~] = fileparts(imgFiles(k).name);
         
-        % Apply single technique
-        processed = applySingleTech(img, technique);
-        
-        % Save processed image
-        outputName = sprintf('%s_processed.png', baseName);
-        imwrite(processed, fullfile(outputFolder, outputName));
+        try
+            % Apply single technique
+            processed = applySingleTech(img, technique);
+            
+            % Save processed image
+            outputName = sprintf('%s_processed.png', baseName);
+            imwrite(processed, fullfile(outputFolder, outputName));
+            
+            fprintf('Processed %s with %s\n', baseName, technique);
+            
+        catch ME
+            fprintf('Error processing %s with %s: %s\n', baseName, technique, ME.message);
+            
+            % Save grayscale as fallback
+            outputName = sprintf('%s_processed.png', baseName);
+            if size(img, 3) == 3
+                grayImg = rgb2gray(img);
+            else
+                grayImg = img;
+            end
+            imwrite(grayImg, fullfile(outputFolder, outputName));
+        end
     end
     
     fprintf('Single technique "%s" complete: %d images processed\n', technique, length(imgFiles));
@@ -43,14 +59,14 @@ function processed = applySingleTech(img, technique)
             
         case 'canny_edge'
             gray = rgb2gray(img);
-            processed = edge(gray, 'Canny');
-            processed = uint8(processed) * 255;
+            edges = edge(gray, 'Canny');
+            processed = uint8(edges) * 255;
             
         case 'adaptive_thresh'
             gray = rgb2gray(img);
             T = adaptthresh(gray, 0.4);
-            processed = imbinarize(gray, T);
-            processed = uint8(processed) * 255;
+            binary = imbinarize(gray, T);
+            processed = uint8(binary) * 255;
             
         otherwise
             % Default to grayscale
@@ -59,6 +75,19 @@ function processed = applySingleTech(img, technique)
     
     % Ensure uint8 output
     if ~isa(processed, 'uint8')
-        processed = im2uint8(processed);
+        if islogical(processed)
+            processed = uint8(processed) * 255;
+        else
+            processed = im2uint8(processed);
+        end
+    end
+    
+    % Ensure the image is valid
+    if isempty(processed) || any(size(processed) == 0)
+        % Fallback to grayscale
+        processed = rgb2gray(img);
+        if ~isa(processed, 'uint8')
+            processed = im2uint8(processed);
+        end
     end
 end
