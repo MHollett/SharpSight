@@ -5,8 +5,9 @@ function processDroneDataset(inputFolder, outputFolder)
     cfg.contrastThreshold = 0.15;
     cfg.lowContrastHSV = 0.1;
     cfg.lightingVarThreshold = 0.03;
-    cfg.edgeWeakThreshold = 0.05;
-    cfg.noiseFractionThreshold = 0.03;   % Less aggressive
+    cfg.edgeThickness = 1;                
+    cfg.cannyThresholds = [0.12 0.3];     
+    cfg.noiseFractionThreshold = 0.03;
     cfg.gapFractionThreshold = 0.015;
     cfg.houghRadiusRange = [8 50];
     cfg.pyramidScales = [1, 0.5, 0.25];
@@ -64,10 +65,18 @@ function processDroneDataset(inputFolder, outputFolder)
         fprintf(fid, "Edge Density: %.6f\n", metrics.edgeDensity);
         fprintf(fid, "Lighting Variance: %.6f\n", metrics.lightingVar);
 
+        fprintf(fid, "\nFiltering:\n");
+        fprintf(fid, "Gaussian Sigma Used: %.3f\n", metrics.gaussianSigma);
+
         fprintf(fid, "\nMorphology Metrics:\n");
         fprintf(fid, "Noise Fraction: %.6f\n", metrics.noiseFraction);
         fprintf(fid, "Gap Fraction: %.6f\n", metrics.gapFraction);
         fprintf(fid, "Morphology Operation: %s\n", metrics.morphologyOperation);
+
+        fprintf(fid, "\nEdge Detection:\n");
+        fprintf(fid, "Canny White Edge Outlines Applied: Yes\n");
+        fprintf(fid, "Edge Thickness: %d px\n", cfg.edgeThickness);
+        fprintf(fid, "Canny Thresholds: [%.2f %.2f]\n", cfg.cannyThresholds(1), cfg.cannyThresholds(2));
 
         fprintf(fid, "\nCircular Hough Transform:\n");
         fprintf(fid, "Total Circles Detected (all scales): %d\n", metrics.totalCircles);
@@ -78,7 +87,7 @@ function processDroneDataset(inputFolder, outputFolder)
         fclose(fid);
     end
 
-    disp('Dataset processing complete (uniform label visualization).');
+    disp('Dataset processing complete (Canny with configurable thresholds and white outlines).');
 
 end
 
@@ -99,6 +108,7 @@ function [pyramidImages, visImg, pipelineStages, metrics, pyramidBoxes, scales] 
     metrics.noise = noiseMetric;
     metrics.edgeDensity = edgeMetric;
     metrics.lightingVar = mean(lightingVar, 'all');
+    metrics.gaussianSigma = 0;
 
     visSteps = {};
     stageLabels = {};
@@ -125,79 +135,88 @@ function [pyramidImages, visImg, pipelineStages, metrics, pyramidBoxes, scales] 
         stageLabels{end+1} = pipelineStages{end};
     end
 
-    % --- Gaussian smoothing ---
+    % --- Adaptive Gaussian smoothing ---
     if noiseMetric > cfg.noiseThreshold
-        imgToProcess = imgaussfilt(imgToProcess, 2);
-        pipelineStages{end+1} = 'Gaussian Smoothing';
+        sigma = min(1.0, max(0.3, noiseMetric * 8));
+        imgToProcess = imgaussfilt(imgToProcess, sigma, 'FilterSize', 3);
+
+        metrics.gaussianSigma = sigma;
+        pipelineStages{end+1} = sprintf('Gaussian Smoothing (σ=%.2f)', sigma);
         visSteps{end+1} = imgToProcess;
         stageLabels{end+1} = pipelineStages{end};
     end
 
-    % --- Adaptive Thresholding vs. Canny ---
-    if metrics.lightingVar > cfg.lightingVarThreshold
-        T = adaptthresh(imgToProcess, 0.4);
-        imgToProcess = imbinarize(imgToProcess, T);
-        pipelineStages{end+1} = 'Adaptive Thresholding (Pre-Canny)';
-        visSteps{end+1} = imgToProcess;
-        stageLabels{end+1} = pipelineStages{end};
-
-        if edgeMetric < cfg.edgeWeakThreshold
-            imgToProcess = edge(imgToProcess, 'Canny');
-            pipelineStages{end+1} = 'Canny Edge Detection (Post-Threshold)';
-            visSteps{end+1} = imgToProcess;
-            stageLabels{end+1} = pipelineStages{end};
-        end
-    else
-        if edgeMetric < cfg.edgeWeakThreshold
-            imgToProcess = edge(imgToProcess, 'Canny');
-            pipelineStages{end+1} = 'Canny Edge Detection (Pre-Threshold)';
-            visSteps{end+1} = imgToProcess;
-            stageLabels{end+1} = pipelineStages{end};
-        end
+    % --- Grayscale Morphology ---
+    imgForMetrics = im2double(imgToProcess);
+    if islogical(imgForMetrics)
+        imgForMetrics = mat2gray(imgForMetrics);
     end
+    tempMask = imbinarize(imgForMetrics, graythresh(imgForMetrics));
 
-    % --- Less aggressive Morphological decision ---
-    if ~islogical(imgToProcess)
-        level = graythresh(imgToProcess);
-        binaryImg = imbinarize(imgToProcess, level);
-    else
-        binaryImg = imgToProcess;
-    end
-
-    noiseFraction = sum(bwareaopen(binaryImg, 2, 8),'all') / numel(binaryImg);
-    filledImg = imfill(binaryImg, 'holes');
-    gapFraction = sum(filledImg(:) - binaryImg(:)) / numel(binaryImg);
+    noiseFraction = sum(bwareaopen(tempMask, 2, 8),'all') / numel(tempMask);
+    filledMask = imfill(tempMask, 'holes');
+    gapFraction = sum(filledMask(:) - tempMask(:)) / numel(tempMask);
 
     se = strel('disk', 3);
 
     if noiseFraction >= cfg.noiseFractionThreshold && noiseFraction > gapFraction
-        imgToProcess = imopen(binaryImg, se);
-        morphOp = 'Opening';
-        pipelineStages{end+1} = 'Morphological Opening';
+        imgToProcess = imopen(imgToProcess, se);
+        morphOp = 'Grayscale Opening';
+        pipelineStages{end+1} = morphOp;
         visSteps{end+1} = imgToProcess;
-        stageLabels{end+1} = pipelineStages{end};
+        stageLabels{end+1} = morphOp;
 
     elseif gapFraction >= cfg.gapFractionThreshold && gapFraction > noiseFraction
-        imgToProcess = imclose(binaryImg, se);
-        morphOp = 'Closing';
-        pipelineStages{end+1} = 'Morphological Closing';
+        imgToProcess = imclose(imgToProcess, se);
+        morphOp = 'Grayscale Closing';
+        pipelineStages{end+1} = morphOp;
         visSteps{end+1} = imgToProcess;
-        stageLabels{end+1} = pipelineStages{end};
+        stageLabels{end+1} = morphOp;
 
     elseif noiseFraction >= cfg.noiseFractionThreshold && gapFraction >= cfg.gapFractionThreshold
-        imgToProcess = imclose(imopen(binaryImg, se), se);
-        morphOp = 'Opening + Closing';
-        pipelineStages{end+1} = 'Opening + Closing';
+        imgToProcess = imclose(imopen(imgToProcess, se), se);
+        morphOp = 'Grayscale Opening + Closing';
+        pipelineStages{end+1} = morphOp;
         visSteps{end+1} = imgToProcess;
-        stageLabels{end+1} = pipelineStages{end};
+        stageLabels{end+1} = morphOp;
     else
-        imgToProcess = imgToProcess;
         morphOp = 'None';
     end
 
     metrics.noiseFraction = noiseFraction;
     metrics.gapFraction = gapFraction;
     metrics.morphologyOperation = morphOp;
+
+    % --- Always Canny Edge Detection with White Outlines ---
+    edges = edge(imgToProcess, 'Canny', cfg.cannyThresholds);
+
+    % Optional edge thickness (dilate edges if > 1)
+    if cfg.edgeThickness > 1
+        seThick = strel('disk', cfg.edgeThickness-1);
+        edges = imdilate(edges, seThick);
+    end
+
+    % Ensure RGB for overlay
+    if size(imgToProcess,3) == 1
+        baseImg = repmat(imgToProcess, [1 1 3]);
+    else
+        baseImg = imgToProcess;
+    end
+
+    edgeOverlay = baseImg;
+
+    % Draw white edges
+    for ch = 1:3
+        channel = edgeOverlay(:,:,ch);
+        channel(edges) = 1;
+        edgeOverlay(:,:,ch) = channel;
+    end
+
+    imgToProcess = edgeOverlay;
+    pipelineStages{end+1} = sprintf('Canny White Edge Outlines (Thresh=%.2f/%.2f, Thick=%d)', ...
+        cfg.cannyThresholds(1), cfg.cannyThresholds(2), cfg.edgeThickness);
+    visSteps{end+1} = imgToProcess;
+    stageLabels{end+1} = pipelineStages{end};
 
     % --- Multi-scale pyramid + Hough ---
     scales = cfg.pyramidScales;
@@ -209,12 +228,12 @@ function [pyramidImages, visImg, pipelineStages, metrics, pyramidBoxes, scales] 
         scaledImg = imresize(imgToProcess, scales(s));
         pyramidImages{s} = im2uint8(scaledImg);
 
-        if islogical(scaledImg)
-            [centers, radii] = imfindcircles(scaledImg, cfg.houghRadiusRange);
+        if islogical(edges)
+            [centers, radii] = imfindcircles(edges, cfg.houghRadiusRange);
             totalCircles = totalCircles + size(centers,1);
 
             if ~isempty(centers)
-                [h, w] = size(scaledImg);
+                [h, w, ~] = size(scaledImg);
                 boxes = [];
                 for i = 1:size(centers,1)
                     cx = centers(i,1) / w;

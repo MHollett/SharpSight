@@ -81,7 +81,7 @@ class SimpleEvaluator:
         for img in images:
             shutil.copy2(img, output_path)
     
-    def _wait_for_files(self, output_path, expected_pattern, expected_count, timeout=720):
+    def _wait_for_files(self, output_path, expected_pattern, expected_count, timeout=2000):
         """Wait for all expected files to be created and stable"""
         print(f"   ⏳ Waiting for {expected_count} files matching '{expected_pattern}'...")
         
